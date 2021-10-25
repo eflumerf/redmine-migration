@@ -7,9 +7,10 @@ import github_translation as translate
 from RedmineToGitHub import RedmineToGitHub
 
 from textile_to_markdown import to_md
-from repositories_to_markdown import FNAL_REDMINE_REPOS, GITHUB_ORG, GITHUB_ORG_REPOS
+from repositories_to_migrate import FNAL_REDMINE_REPOS, GITHUB_ORG, GITHUB_ORG_REPOS
 
 import argparse
+import time
 
 _FNAL_REDMINE_URL = "https://cdcvs.fnal.gov/redmine/"
 
@@ -37,7 +38,7 @@ def concat_mds(*mds):
     return result
 
 
-def gh_login_or_name(redmine, user, redmine2gh):
+def gh_login_or_not_set(redmine, user, redmine2gh):
     login = redmine2gh.gh_login(user.name)
     if login is not None:
         return login
@@ -45,17 +46,25 @@ def gh_login_or_name(redmine, user, redmine2gh):
     email = _KNOWN_EMAIL_ADDRESSES.get(user.name)
     if email is not None:
         login = redmine2gh.search_for_login(user.name, email)
-        return login if login is not None else user.name
+        return GithubObject.NotSet if login is None else login
 
     redmine_user = None
     try:
         redmine_user = redmine.user.get(user.id)
     except ResourceNotFoundError:
-        return user.name
+        return GithubObject.NotSet
 
     email = getattr(redmine_user, "mail", None)
     login = redmine2gh.search_for_login(user.name, email)
-    return login if login is not None else user.name
+    return GithubObject.NotSet if login is None else login
+
+
+def at_gh_login_or_name(redmine, user, redmine2gh):
+    login = gh_login_or_not_set(redmine, user, redmine2gh)
+    if login is GithubObject.NotSet:
+        return user.name
+
+    return "@" + login
 
 
 def migrate_issues_from(redmine, get_users, redmine2gh, gh_org, redmine_repo, gh_repo):
@@ -82,19 +91,19 @@ def migrate_issues_from(redmine, get_users, redmine2gh, gh_org, redmine_repo, gh
             # Ensures that we do not process nested repos to themselves.
             continue
 
-        if i != 1:
-            continue
+        # if i != 1:
+        #     continue
 
         status_bar = f"[{i + 1:{width}d}/{n_issues}]"
         comments = []
-        author = gh_login_or_name(redmine, issue.author, redmine2gh)
+        author = at_gh_login_or_name(redmine, issue.author, redmine2gh)
         for journal in issue.journals:
             if not hasattr(journal, "notes"):
                 continue
             if not journal.notes:
                 continue
 
-            username = gh_login_or_name(redmine, journal.user, redmine2gh)
+            username = at_gh_login_or_name(redmine, journal.user, redmine2gh)
             header = f"*Comment by `{username}` on {journal.created_on}*"
             comments.append(concat_mds(header, to_md(journal.notes)))
 
@@ -107,14 +116,14 @@ def migrate_issues_from(redmine, get_users, redmine2gh, gh_org, redmine_repo, gh
             subtasks_and_relations = "\n***Subtasks (FNAL account required):***"
             for subtask in issue.children:
                 subtasks_and_relations += (
-                    f"\n*- [issue.subject]({redmine_issue_url(subtask)})*"
+                    f"\n*- [{subtask.subject}]({redmine_issue_url(subtask)})*"
                 )
 
         if len(issue.relations) > 0:
-            subtasks_and_relations += f"\n***Related tasks (FNAL account required):***"
+            subtasks_and_relations += "\n***Related tasks (FNAL account required):***"
             for relation in issue.relations:
                 subtasks_and_relations += (
-                    f"\n*- [{issue.subject}]({redmine_issue_url(relation)})*"
+                    f"\n*- [{relation.subject}]({redmine_issue_url(relation)})*"
                 )
 
         gh_issue_body = concat_mds(
@@ -123,25 +132,32 @@ def migrate_issues_from(redmine, get_users, redmine2gh, gh_org, redmine_repo, gh
             to_md(issue.description),
             subtasks_and_relations,
         )
-        assignee = (
-            GithubObject.NotSet
-        )  # getattr(issue, "assigned_to", GithubObject.NotSet)
+
+        assigned_to = getattr(issue, "assigned_to", GithubObject.NotSet)
+        if assigned_to is not GithubObject.NotSet:
+            assigned_to = gh_login_or_not_set(redmine, assigned_to, redmine2gh)
 
         if repo is None:
-            print(f"  {status_bar} Issue #{issue.id}: {issue.subject}")
+            print(f"\nIssue #{issue.id}: {issue.subject}")
+            print(f"  - Assigned to {assigned_to}")
             print(gh_issue_body)
             for comment in comments:
                 print(comment)
         else:
-            issue = repo.create_issue(
+            gh_issue = repo.create_issue(
                 issue.subject,
                 body=gh_issue_body,
                 labels=[issue.tracker.name],
-                assignee=assignee,
+                assignee=assigned_to,
             )
             for comment in comments:
-                issue.create_comment(comment)
-            print(f"  {status_bar} Created issue #{issue.number}: {issue.title}")
+                time.sleep(2.2)
+                gh_issue.create_comment(comment)
+            print(f"  {status_bar} Created issue #{gh_issue.number}: {gh_issue.title}")
+            print(f"        ({gh_issue.url})")
+
+        # Update Redmine issue with new GitHub issue ID; then close issue.
+        issue.update(notes="This issue has moved to {gh_issue.url}", status_id=2)
 
 
 def migrate(dry_run, get_users):

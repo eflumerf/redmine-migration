@@ -1,30 +1,23 @@
 import re
 
 
-def to_gh_label(redmine_tracker):
-    if redmine_tracker == "Feature":
-        return "enhancement"
-    if redmine_tracker == "Bug":
-        return "bug"
-    if redmine_tracker == "Feedback":
-        return "question"
-    return "invalid"
-
-
 def to_md_normal(result):
     # Type face
     result = re.sub(r"\*(.*?)\*", r"**\1**", result)  # Bold-face
     result = re.sub(r"\b\_(.*?)\_\b", r"*\1*", result)  # Italicized
 
     # Lists
-    result = re.sub(r"^\* ", r"- ", result, flags=re.MULTILINE)  # Un-numbered lists
-    result = re.sub(r"^\# ", r"1. ", result, flags=re.MULTILINE)  # Numbered lists
+    result = re.sub(r"^\* ", "- ", result, flags=re.MULTILINE)  # Un-numbered lists
+    result = re.sub(r"^\# ", "1. ", result, flags=re.MULTILINE)  # Numbered lists
 
     # Headings
-    result = re.sub(r"h1\.", r"#", result)
-    result = re.sub(r"h2\.", r"##", result)
-    result = re.sub(r"h3\.", r"###", result)
-    result = re.sub(r"h4\.", r"####", result)
+    result = re.sub(r"^h1\.", "#", result, flags=re.MULTILINE)
+    result = re.sub(r"^h2\.", "##", result, flags=re.MULTILINE)
+    result = re.sub(r"^h3\.", "###", result, flags=re.MULTILINE)
+    result = re.sub(r"^h4\.", "####", result, flags=re.MULTILINE)
+
+    # Issues
+    result = re.sub(r"\s+\#(\d{3,5})", r"Redmine issue \1", result)
 
     return result
 
