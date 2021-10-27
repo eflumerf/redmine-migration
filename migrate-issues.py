@@ -1,6 +1,6 @@
 from redminelib import Redmine
 from redminelib.exceptions import ResourceNotFoundError
-from github import Github, GithubObject
+from github import Github, GithubObject, GithubException
 
 from termcolor import colored
 
@@ -48,6 +48,23 @@ def concat_mds(*mds):
         result += "\n\n----\n\n"
         result += md
     return result
+
+
+def guarded_gh_call(gh_method, *args, **kwargs):
+    attempt = 0
+    while attempt < 2:
+        try:
+            time.sleep(2.5)  # Attempt to avoid GitHub's API limits
+            return gh_method(*args, **kwargs)
+        except GithubException as e:
+            if e.status == 403 and e.data["message"].startswith(
+                "You have exceeded a secondary rate limit"
+            ):
+                print(" \n   (Waiting one minute due to rate limit)\n")
+                time.sleep(60)
+                attempt += 1
+            else:
+                raise e
 
 
 def gh_login_or_not_set(redmine, user):
@@ -195,16 +212,16 @@ def migrate_issues_from(redmine, parsed_args, redmine_repo, gh_repo):
         if issue.priority.name.lower() in {"high", "urgent", "immediate"}:
             gh_labels.append("high priority")
 
-        time.sleep(2.5)  # Avoid GitHub's rate limits
-        gh_issue = repo.create_issue(
+        gh_issue = guarded_gh_call(
+            repo.create_issue,
             issue.subject,
             body=gh_issue_body,
             labels=gh_labels,
             assignee=assigned_to,
         )
+
         for comment in comments:
-            time.sleep(2.5)  # Avoid GitHub's rate limits
-            gh_issue.create_comment(comment)
+            guarded_gh_call(gh_issue.create_comment, comment)
 
         _GH_ISSUES[issue.subject] = (issue, gh_issue)
         if has_subtasks_or_relations:
