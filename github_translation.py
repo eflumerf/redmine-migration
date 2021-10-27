@@ -24,8 +24,8 @@ users = {
     "Iker de Icaza Astiz": "ikatza",  # icaza@fnal.gov
     "Jacob Calcutt": "calcuttj",  # calcuttj@msu.edu
     "Jason Stock": None,  # jason.stock@mines.sdsmt.edu
-    "Jim Kowalkowski": None,  # jbk@fnal.gov
-    "Kurt Biery": None,  # biery@fnal.gov
+    "Jim Kowalkowski": "jbkowalkowski",  # jbk@fnal.gov
+    "Kurt Biery": "bieryAtFnal",  # biery@fnal.gov
     "Kyle Knoepfel": "knoepfel",  # knoepfel@fnal.gov
     "Liang Li": None,  # liangli@fnal.gov
     "Lisa Goodenough": "goodenou",  # goodenou@fnal.gov
@@ -39,7 +39,7 @@ users = {
     "Raymond Culbertson": "rlcee",  # rlc@fnal.gov
     "Rob Kutschke": "kutschke",  # kutschke@fnal.gov
     "Robert Sulej": "robertsulej",  # robert.sulej@cern.ch
-    "Ron Rechenmacher": None,  # ron@fnal.gov
+    "Ron Rechenmacher": "ron003",  # ron@fnal.gov
     "Thomas Junk": "tomjunk",  # trj@fnal.gov
     "Walter E Brown": "W-E-Brown",
 }

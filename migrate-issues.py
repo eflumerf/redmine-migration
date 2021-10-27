@@ -2,11 +2,13 @@ from redminelib import Redmine
 from redminelib.exceptions import ResourceNotFoundError
 from github import Github, GithubObject
 
+from termcolor import colored
+
 import settings
 import github_translation as translate
 from RedmineToGitHub import RedmineToGitHub
 
-from textile_to_markdown import to_md
+from textile_to_markdown import TextileToMarkdown
 from repositories_to_migrate import FNAL_REDMINE_REPOS, GITHUB_ORG, GITHUB_ORG_REPOS
 
 import argparse
@@ -14,10 +16,19 @@ import time
 
 _FNAL_REDMINE_URL = "https://cdcvs.fnal.gov/redmine/"
 
-_KNOWN_EMAIL_ADDRESSES = {
-    "Christopher Green": "greenc@fnal.gov",
-    "Marc Paterno": "paterno@fnal.gov",
-}
+_GH = Github(login_or_token=settings.GITHUB_LOGIN_OR_TOKEN)
+_GH_ORG = _GH.get_organization(GITHUB_ORG)
+_GH_ORG_MEMBERS = list(map(lambda e: e.login, _GH_ORG.get_members()))
+
+_REDMINE_TO_GITHUB = RedmineToGitHub(_GH, translate.users)
+_TEXTILE_TO_MARKDOWN = TextileToMarkdown(GITHUB_ORG)
+
+_ISSUES_WITH_SUBTASKS = {}
+_ISSUES_WITH_RELATIONS = {}
+_GH_ISSUES_WITH_DEPENDENCIES = {}
+
+_GREEN_CHECKMARK = colored("\u2714", "green")
+_RED_HEAVY_BALLOT_X = colored("\u2718", "red")
 
 
 def redmine_issue_url(issue):
@@ -38,15 +49,10 @@ def concat_mds(*mds):
     return result
 
 
-def gh_login_or_not_set(redmine, user, redmine2gh):
-    login = redmine2gh.gh_login(user.name)
+def gh_login_or_not_set(redmine, user):
+    login = _REDMINE_TO_GITHUB.gh_login(user.name)
     if login is not None:
         return login
-
-    email = _KNOWN_EMAIL_ADDRESSES.get(user.name)
-    if email is not None:
-        login = redmine2gh.search_for_login(user.name, email)
-        return GithubObject.NotSet if login is None else login
 
     redmine_user = None
     try:
@@ -55,23 +61,44 @@ def gh_login_or_not_set(redmine, user, redmine2gh):
         return GithubObject.NotSet
 
     email = getattr(redmine_user, "mail", None)
-    login = redmine2gh.search_for_login(user.name, email)
+    login = _REDMINE_TO_GITHUB.search_for_login(user.name, email)
     return GithubObject.NotSet if login is None else login
 
 
-def at_gh_login_or_name(redmine, user, redmine2gh):
-    login = gh_login_or_not_set(redmine, user, redmine2gh)
+def at_gh_login_or_name(redmine, user):
+    login = gh_login_or_not_set(redmine, user)
     if login is GithubObject.NotSet:
         return user.name
 
     return "@" + login
 
 
-def migrate_issues_from(redmine, get_users, redmine2gh, gh_org, redmine_repo, gh_repo):
+def issue_comments(redmine, journals, gh_repo):
+    result = []
+    for journal in journals:
+        if not hasattr(journal, "notes"):
+            continue
+        if not journal.notes:
+            continue
+
+        username = at_gh_login_or_name(redmine, journal.user)
+        header = f"*Comment by `{username}` on {journal.created_on}*"
+        result.append(
+            concat_mds(header, _TEXTILE_TO_MARKDOWN.to_md(journal.notes, gh_repo))
+        )
+    return result
+
+
+def migrate_issues_from(redmine, parsed_args, redmine_repo, gh_repo):
     redmine_issues = redmine.project.get(redmine_repo).issues
-    n_issues = len(redmine_issues)
+    repo = None if parsed_args.dry_run else _GH_ORG.get_repo(gh_repo)
+
+    # Ensures that we do not process nested repos to themselves.
+    trimmed_redmine_issues = [
+        issue for issue in redmine_issues if issue.project.name == redmine_repo
+    ]
+    n_issues = len(trimmed_redmine_issues)
     width = len(str(n_issues))
-    repo = gh_org.get_repo(gh_repo) if gh_org is not None else None
 
     if n_issues == 0:
         print(f"\nNo {redmine_repo} issues to migrate from Redmine to GitHub")
@@ -81,105 +108,202 @@ def migrate_issues_from(redmine, get_users, redmine2gh, gh_org, redmine_repo, gh
         print(
             f"\nWould migrate {n_issues} {redmine_repo} issues from Redmine to GitHub"
         )
-    elif get_users:
+    elif parsed_args.get_users:
         print(f"\nGetting users for Redmine issues in {redmine_repo}")
     else:
         print(f"\nMigrating {n_issues} {redmine_repo} issues from Redmine to GitHub")
 
-    for i, issue in enumerate(redmine_issues):
-        if issue.project.name != redmine_repo:
-            # Ensures that we do not process nested repos to themselves.
-            continue
-
-        # if i != 1:
-        #     continue
+    for i, issue in enumerate(reversed(trimmed_redmine_issues)):
+        author = at_gh_login_or_name(redmine, issue.author)
+        comments = issue_comments(redmine, issue.journals, gh_repo)
 
         status_bar = f"[{i + 1:{width}d}/{n_issues}]"
-        comments = []
-        author = at_gh_login_or_name(redmine, issue.author, redmine2gh)
-        for journal in issue.journals:
-            if not hasattr(journal, "notes"):
-                continue
-            if not journal.notes:
-                continue
+        status_bar_width = len(status_bar) * " "
 
-            username = at_gh_login_or_name(redmine, journal.user, redmine2gh)
-            header = f"*Comment by `{username}` on {journal.created_on}*"
-            comments.append(concat_mds(header, to_md(journal.notes)))
-
-        if get_users:
+        if parsed_args.get_users:
             print(f"  {status_bar} Gathered users for issue #{issue.id}")
             continue
 
-        subtasks_and_relations = ""
+        has_subtasks_or_relations = False
+
         if len(issue.children) > 0:
-            subtasks_and_relations = "\n***Subtasks (FNAL account required):***"
+            has_subtasks_or_relations = True
+            subtasks = []
             for subtask in issue.children:
-                subtasks_and_relations += (
-                    f"\n*- [{subtask.subject}]({redmine_issue_url(subtask)})*"
+                subtasks.append(
+                    {
+                        "subject": subtask.subject,
+                        "redmine_url": redmine_issue_url(subtask),
+                    }
                 )
+            _ISSUES_WITH_SUBTASKS[issue.subject] = subtasks
 
         if len(issue.relations) > 0:
-            subtasks_and_relations += "\n***Related tasks (FNAL account required):***"
+            has_subtasks_or_relations = True
+            relations = []
             for relation in issue.relations:
-                subtasks_and_relations += (
-                    f"\n*- [{relation.subject}]({redmine_issue_url(relation)})*"
+                related_issue = redmine.issue.get(relation.issue_to_id)
+                relations.append(
+                    {
+                        "subject": related_issue.subject,
+                        "redmine_url": redmine_issue_url(related_issue),
+                    }
                 )
+            _ISSUES_WITH_RELATIONS[issue.subject] = relations
 
         gh_issue_body = concat_mds(
             f"*This issue has been migrated from {redmine_issue_url(issue)} (FNAL account required)*\n"
-            f"*Originally created by `{author}`*",
-            to_md(issue.description),
-            subtasks_and_relations,
+            f"*Originally created by `{author}` on {issue.created_on}*",
+            _TEXTILE_TO_MARKDOWN.to_md(issue.description, gh_repo),
         )
 
         assigned_to = getattr(issue, "assigned_to", GithubObject.NotSet)
         if assigned_to is not GithubObject.NotSet:
-            assigned_to = gh_login_or_not_set(redmine, assigned_to, redmine2gh)
+            assigned_to = gh_login_or_not_set(redmine, assigned_to)
+            if assigned_to not in _GH_ORG_MEMBERS:
+                print(
+                    f"  {_RED_HEAVY_BALLOT_X} {status_bar} Could not migrate issue #{issue.id}: {issue.subject}"
+                )
+                print(
+                    f"    {status_bar_width}  - Assignee {assigned_to} is not a member of {_GH_ORG.login}."
+                )
+                continue
 
         if repo is None:
-            print(f"\nIssue #{issue.id}: {issue.subject}")
-            print(f"  - Assigned to {assigned_to}")
-            print(gh_issue_body)
-            for comment in comments:
-                print(comment)
-        else:
-            gh_issue = repo.create_issue(
-                issue.subject,
-                body=gh_issue_body,
-                labels=[issue.tracker.name],
-                assignee=assigned_to,
+            print(
+                f"  {_GREEN_CHECKMARK} {status_bar} Would migrate issue #{issue.id}: {issue.subject}"
             )
-            for comment in comments:
-                time.sleep(2.2)
-                gh_issue.create_comment(comment)
-            print(f"  {status_bar} Created issue #{gh_issue.number}: {gh_issue.title}")
-            print(f"        ({gh_issue.url})")
+            if parsed_args.verbose:
+                print(f"\nIssue #{issue.id}: {issue.subject}")
+                if assigned_to is not GithubObject.NotSet:
+                    print(f"  - Assigned to {assigned_to}")
+                print(gh_issue_body)
+                for comment in comments:
+                    print(comment)
 
-        # Update Redmine issue with new GitHub issue ID; then close issue.
-        issue.update(notes="This issue has moved to {gh_issue.url}", status_id=2)
+            continue
+
+        # If actually doing the migration
+        gh_labels = [issue.tracker.name.lower()]
+        if issue.priority.name.lower() in {"high", "urgent", "immediate"}:
+            gh_labels.append("high priority")
+
+        time.sleep(2.5)  # Avoid GitHub's rate limits
+        gh_issue = repo.create_issue(
+            issue.subject,
+            body=gh_issue_body,
+            labels=gh_labels,
+            assignee=assigned_to,
+        )
+        for comment in comments:
+            time.sleep(2.5)  # Avoid GitHub's rate limits
+            gh_issue.create_comment(comment)
+        if has_subtasks_or_relations:
+            _GH_ISSUES_WITH_DEPENDENCIES[issue.subject] = gh_issue
+
+        print(
+            f"  {_GREEN_CHECKMARK} {status_bar} Created issue #{gh_issue.number}: {gh_issue.title}"
+        )
+        print(f"    {status_bar_width}  - {gh_issue.html_url}")
+
+        if parsed_args.close_redmine_issues:
+            # Update Redmine issue with new GitHub issue ID; then close issue (status ID 5).
+            redmine.issue.update(
+                issue.id,
+                notes=f"This issue has moved to {gh_issue.html_url}",
+                status_id=5,
+            )
 
 
-def migrate(dry_run, get_users):
+def migrate(parsed_args):
     redmine = Redmine(
         _FNAL_REDMINE_URL,
         username=settings.REDMINE_USERNAME,
         key=settings.REDMINE_API_PUBLIC_KEY,
     )
 
-    gh = Github(login_or_token=settings.GITHUB_LOGIN_OR_TOKEN)
-    gh_org = None
-    if not dry_run:
-        gh_org = gh.get_organization(GITHUB_ORG)
-
-    redmine2gh = RedmineToGitHub(gh, translate.users)
     for repo, gh_repo in zip(FNAL_REDMINE_REPOS, GITHUB_ORG_REPOS):
-        migrate_issues_from(redmine, get_users, redmine2gh, gh_org, repo, gh_repo)
+        migrate_issues_from(redmine, parsed_args, repo, gh_repo)
 
     print()
 
-    if get_users:
-        print(redmine2gh.table())
+    if parsed_args.get_users:
+        print(_REDMINE_TO_GITHUB.table())
+        return
+
+    if not _ISSUES_WITH_SUBTASKS and not _ISSUES_WITH_RELATIONS:
+        return
+
+    print("Updating issues with subtasks and related issues")
+
+    # Pre-populate dictionary
+    issue_dependencies = {}
+    for issue in _ISSUES_WITH_SUBTASKS.keys():
+        issue_dependencies.setdefault(issue, "")
+    for issue in _ISSUES_WITH_RELATIONS.keys():
+        issue_dependencies.setdefault(issue, "")
+
+    n_issues_with_subtasks = len(_ISSUES_WITH_SUBTASKS)
+    if n_issues_with_subtasks != 0:
+        print(f"  Locating subtasks for {n_issues_with_subtasks} issues")
+    for key, subtasks in _ISSUES_WITH_SUBTASKS.items():
+        subtasks_str = "\n***Subtasks:***"
+        for d in subtasks:
+            time.sleep(2.5)  # Avoid GitHub rate limits
+            issues = _GH.search_issues(f"{d['subject']} in:title is:issue is:open")
+            entry = ""
+            if issues.totalCount == 1:
+                entry = issues[0].html_url
+            else:
+                entry = d["redmine_url"] + " (FNAL account required)"
+            subtasks_str += f"\n*- {entry}*"
+        issue_dependencies[key] += subtasks_str
+
+    n_issues_with_relations = len(_ISSUES_WITH_RELATIONS)
+    if n_issues_with_relations != 0:
+        print(f"  Locating related issues for {n_issues_with_relations} issues")
+    for key, subtasks in _ISSUES_WITH_RELATIONS.items():
+        subtasks_str = "\n***Related issues:***"
+        for d in subtasks:
+            time.sleep(2.5)  # Avoid GitHub rate limits
+            issues = _GH.search_issues(f"{d['subject']} in:title is:issue is:open")
+            entry = ""
+            if issues.totalCount == 1:
+                entry = issues[0].html_url
+            else:
+                entry = d["redmine_url"] + " (FNAL account required)"
+            subtasks_str += f"\n*- {entry}*\n"
+        issue_dependencies[key] += subtasks_str
+
+    n_issues_with_dependencies = len(issue_dependencies)
+    width = len(str(n_issues_with_dependencies))
+    print(f"\n  Updating {n_issues_with_dependencies} issues")
+
+    for i, (key, body_str) in enumerate(issue_dependencies.items()):
+        status_bar = f"[{i + 1:{width}d}/{n_issues_with_dependencies}]"
+        gh_issue = _GH_ISSUES_WITH_DEPENDENCIES.get(key)
+        if gh_issue is not None:
+            gh_issue.edit(body=concat_mds(gh_issue.body, body_str))
+            continue
+
+        issues = _GH.search_issues(f"{key} in:title is:issue is:open")
+        if issues.totalCount == 1:
+            if parsed_args.dry_run:
+                print(
+                    f"  {_GREEN_CHECKMARK} {status_bar} Would update issue dependencies of {issues[0].html_url}"
+                )
+            else:
+                issues[0].edit(body=concat_mds(issues[0].body, body_str))
+                print(
+                    f"  {_GREEN_CHECKMARK} {status_bar} Updated issue dependencies of {issues[0].html_url}"
+                )
+            continue
+
+        print(
+            f"  {_RED_HEAVY_BALLOT_X} {status_bar} Cannot find GitHub issue with title '{key}'"
+        )
+
+    print()
 
 
 if __name__ == "__main__":
@@ -193,10 +317,25 @@ if __name__ == "__main__":
         help="Show which migrations would occur without contacting GitHub.",
     )
     parser.add_argument(
+        "--close-redmine-issues",
+        action="store_true",
+        help="Close Redmine issues upon migration to GitHub.",
+    )
+    parser.add_argument(
         "--get-users",
         action="store_true",
         help="Show which users are mentioned in Redmine issues and comments.",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show what information would be published to GitHub.",
+    )
 
     args = parser.parse_args()
-    migrate(args.dry_run, args.get_users)
+    migrate(args)
+
+    if args.dry_run:
+        print("Succesful dry run of migration.")
+    else:
+        print("Migration was succesful.")
