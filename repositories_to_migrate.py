@@ -8,7 +8,7 @@ FNAL_REDMINE_REPOS = [
     # "messagefacility",
     # "canvas",
     # "canvas_root_io",
-    "art",
+    # "art",
     # "art_root_io",
     # "gallery",
     # "critic",
@@ -16,7 +16,7 @@ FNAL_REDMINE_REPOS = [
     # "mrb",
     # "cetbuildtools",
     # "studio",
-    # "tag_suite",
+    "tag_suite",
 ]
 
 GITHUB_ORG = "test-art-framework-suite"

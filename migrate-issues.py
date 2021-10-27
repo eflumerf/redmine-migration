@@ -25,10 +25,11 @@ _TEXTILE_TO_MARKDOWN = TextileToMarkdown(GITHUB_ORG)
 
 _ISSUES_WITH_SUBTASKS = {}
 _ISSUES_WITH_RELATIONS = {}
-_GH_ISSUES_WITH_DEPENDENCIES = {}
+_GH_ISSUES = {}
 
 _GREEN_CHECKMARK = colored("\u2714", "green")
 _RED_HEAVY_BALLOT_X = colored("\u2718", "red")
+_YELLOW_CIRCLE_BULLET = colored("\u25cf", "yellow")
 
 
 def redmine_issue_url(issue):
@@ -97,6 +98,7 @@ def migrate_issues_from(redmine, parsed_args, redmine_repo, gh_repo):
     trimmed_redmine_issues = [
         issue for issue in redmine_issues if issue.project.name == redmine_repo
     ]
+    n_migrated_issues = 0
     n_issues = len(trimmed_redmine_issues)
     width = len(str(n_issues))
 
@@ -170,9 +172,14 @@ def migrate_issues_from(redmine, parsed_args, redmine_repo, gh_repo):
                 continue
 
         if repo is None:
-            print(
-                f"  {_GREEN_CHECKMARK} {status_bar} Would migrate issue #{issue.id}: {issue.subject}"
-            )
+            if has_subtasks_or_relations:
+                print(
+                    f"  {_YELLOW_CIRCLE_BULLET} {status_bar} Would partially migrate Redmine issue #{issue.id}: {issue.subject}"
+                )
+            else:
+                print(
+                    f"  {_GREEN_CHECKMARK} {status_bar} Would migrate Redmine issue #{issue.id}: {issue.subject}"
+                )
             if parsed_args.verbose:
                 print(f"\nIssue #{issue.id}: {issue.subject}")
                 if assigned_to is not GithubObject.NotSet:
@@ -198,21 +205,85 @@ def migrate_issues_from(redmine, parsed_args, redmine_repo, gh_repo):
         for comment in comments:
             time.sleep(2.5)  # Avoid GitHub's rate limits
             gh_issue.create_comment(comment)
+
+        _GH_ISSUES[issue.subject] = (issue, gh_issue)
         if has_subtasks_or_relations:
-            _GH_ISSUES_WITH_DEPENDENCIES[issue.subject] = gh_issue
-
-        print(
-            f"  {_GREEN_CHECKMARK} {status_bar} Created issue #{gh_issue.number}: {gh_issue.title}"
-        )
-        print(f"    {status_bar_width}  - {gh_issue.html_url}")
-
-        if parsed_args.close_redmine_issues:
-            # Update Redmine issue with new GitHub issue ID; then close issue (status ID 5).
-            redmine.issue.update(
-                issue.id,
-                notes=f"This issue has moved to {gh_issue.html_url}",
-                status_id=5,
+            print(
+                f"  {_YELLOW_CIRCLE_BULLET} {status_bar} Partially migrated Redmine issue #{issue.id}: {issue.subject}"
             )
+            print(f"    {status_bar_width}  - {gh_issue.html_url}")
+            print(
+                f"    {status_bar_width}  - Will not close Redmine issue #{issue.id} until issue dependencies are resolved"
+            )
+        else:
+            symbol = _YELLOW_CIRCLE_BULLET
+            redmine_message = f"Could not close Redmine issue #{issue.id}"
+            if parsed_args.close_redmine_issues:
+                # Update Redmine issue with new GitHub issue ID; then close issue (status ID 5).
+                redmine.issue.update(
+                    issue.id,
+                    notes=f"This issue has moved to {gh_issue.html_url}",
+                    status_id=5,
+                )
+                if redmine.issue.get(issue.id).status.id == 5:
+                    # Redmine issue was closed
+                    symbol = _GREEN_CHECKMARK
+                    redmine_message = f"Closed Redmine issue #{issue.id}"
+            print(
+                f"  {symbol} {status_bar} Created issue #{gh_issue.number}: {gh_issue.title}"
+            )
+            print(f"    {status_bar_width}  - {gh_issue.html_url}")
+            print(f"    {status_bar_width}  - {redmine_message}")
+
+    return n_migrated_issues, n_issues
+
+
+def dependency_link(dependency):
+    # Check organization first
+    time.sleep(2.5)  # Avoid GitHub rate limits
+    issues = _GH.search_issues(
+        f"{dependency['subject']} in:title is:issue is:open org:{GITHUB_ORG}"
+    )
+    if issues.totalCount == 1:
+        return issues[0].html_url
+
+    time.sleep(2.5)  # Avoid GitHub rate limits
+    issues = _GH.search_issues(f"{dependency['subject']} in:title is:issue is:open")
+    if issues.totalCount == 1:
+        return issues[0].html_url
+
+    return dependency["redmine_url"] + " (FNAL account required)"
+
+
+def update_gh_issue_body(status_bar, redmine, redmine_issue, gh_issue, body_addendum):
+    gh_issue.edit(body=concat_mds(gh_issue.body, body_addendum))
+    # Update Redmine issue with new GitHub issue ID; then close issue (status ID 5).
+    redmine.issue.update(
+        redmine_issue.id,
+        notes=f"This issue has moved to {gh_issue.html_url}",
+        status_id=5,
+    )
+    status_bar_width = len(status_bar) * " "
+    if redmine.issue.get(redmine_issue.id).status.id != 5:
+        print(
+            f"  {_YELLOW_CIRCLE_BULLET} {status_bar} Could not complete migration for Redmine issue #{redmine_issue.id}"
+        )
+        print(
+            f"    {status_bar_width}  - Updated issue dependencies for {gh_issue.html_url}"
+        )
+        print(
+            f"    {status_bar_width}  - Could not close Redmine issue #{redmine_issue.id}"
+        )
+        return
+
+    # Redmine issue was closed
+    print(
+        f"  {_GREEN_CHECKMARK} {status_bar} Completed migration of Redmine issue #{redmine_issue.id}: {redmine_issue.subject}"
+    )
+    print(
+        f"    {status_bar_width}  - Updated issue dependencies for {gh_issue.html_url}"
+    )
+    print(f"    {status_bar_width}  - Closed Redmine issue #{redmine_issue.id}")
 
 
 def migrate(parsed_args):
@@ -249,14 +320,7 @@ def migrate(parsed_args):
     for key, subtasks in _ISSUES_WITH_SUBTASKS.items():
         subtasks_str = "\n***Subtasks:***"
         for d in subtasks:
-            time.sleep(2.5)  # Avoid GitHub rate limits
-            issues = _GH.search_issues(f"{d['subject']} in:title is:issue is:open")
-            entry = ""
-            if issues.totalCount == 1:
-                entry = issues[0].html_url
-            else:
-                entry = d["redmine_url"] + " (FNAL account required)"
-            subtasks_str += f"\n*- {entry}*"
+            subtasks_str += "\n- " + dependency_link(d)
         issue_dependencies[key] += subtasks_str
 
     n_issues_with_relations = len(_ISSUES_WITH_RELATIONS)
@@ -265,14 +329,7 @@ def migrate(parsed_args):
     for key, subtasks in _ISSUES_WITH_RELATIONS.items():
         subtasks_str = "\n***Related issues:***"
         for d in subtasks:
-            time.sleep(2.5)  # Avoid GitHub rate limits
-            issues = _GH.search_issues(f"{d['subject']} in:title is:issue is:open")
-            entry = ""
-            if issues.totalCount == 1:
-                entry = issues[0].html_url
-            else:
-                entry = d["redmine_url"] + " (FNAL account required)"
-            subtasks_str += f"\n*- {entry}*\n"
+            subtasks_str += "\n- " + dependency_link(d)
         issue_dependencies[key] += subtasks_str
 
     n_issues_with_dependencies = len(issue_dependencies)
@@ -281,22 +338,10 @@ def migrate(parsed_args):
 
     for i, (key, body_str) in enumerate(issue_dependencies.items()):
         status_bar = f"[{i + 1:{width}d}/{n_issues_with_dependencies}]"
-        gh_issue = _GH_ISSUES_WITH_DEPENDENCIES.get(key)
-        if gh_issue is not None:
-            gh_issue.edit(body=concat_mds(gh_issue.body, body_str))
-            continue
-
-        issues = _GH.search_issues(f"{key} in:title is:issue is:open")
-        if issues.totalCount == 1:
-            if parsed_args.dry_run:
-                print(
-                    f"  {_GREEN_CHECKMARK} {status_bar} Would update issue dependencies of {issues[0].html_url}"
-                )
-            else:
-                issues[0].edit(body=concat_mds(issues[0].body, body_str))
-                print(
-                    f"  {_GREEN_CHECKMARK} {status_bar} Updated issue dependencies of {issues[0].html_url}"
-                )
+        entry = _GH_ISSUES.get(key)
+        if entry is not None:
+            redmine_issue, gh_issue = entry
+            update_gh_issue_body(status_bar, redmine, redmine_issue, gh_issue, body_str)
             continue
 
         print(
