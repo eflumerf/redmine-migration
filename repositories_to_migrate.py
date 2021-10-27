@@ -6,17 +6,17 @@ FNAL_REDMINE_REPOS = [
     # "fhicl-cpp",
     # "fhicl-py",
     # "messagefacility",
-    # "canvas",
-    # "canvas_root_io",
+    "canvas",
+    "canvas_root_io",
     # "art",
-    # "art_root_io",
+    "art_root_io",
     # "gallery",
     # "critic",
     # "ifdh-art",
     # "mrb",
     # "cetbuildtools",
     # "studio",
-    "tag_suite",
+    # "tag_suite",
 ]
 
 GITHUB_ORG = "test-art-framework-suite"

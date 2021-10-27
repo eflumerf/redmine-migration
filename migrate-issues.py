@@ -230,7 +230,7 @@ def migrate_issues_from(redmine, parsed_args, redmine_repo, gh_repo):
                     symbol = _GREEN_CHECKMARK
                     redmine_message = f"Closed Redmine issue #{issue.id}"
             print(
-                f"  {symbol} {status_bar} Created issue #{gh_issue.number}: {gh_issue.title}"
+                f"  {symbol} {status_bar} Migrated issue #{issue.id}: {issue.subject}"
             )
             print(f"    {status_bar_width}  - {gh_issue.html_url}")
             print(f"    {status_bar_width}  - {redmine_message}")
@@ -255,14 +255,17 @@ def dependency_link(dependency):
     return dependency["redmine_url"] + " (FNAL account required)"
 
 
-def update_gh_issue_body(status_bar, redmine, redmine_issue, gh_issue, body_addendum):
+def update_gh_issue_body(
+    close_redmine_issue, status_bar, redmine, redmine_issue, gh_issue, body_addendum
+):
     gh_issue.edit(body=concat_mds(gh_issue.body, body_addendum))
-    # Update Redmine issue with new GitHub issue ID; then close issue (status ID 5).
-    redmine.issue.update(
-        redmine_issue.id,
-        notes=f"This issue has moved to {gh_issue.html_url}",
-        status_id=5,
-    )
+    if close_redmine_issues:
+        # Update Redmine issue with new GitHub issue ID; then close issue (status ID 5).
+        redmine.issue.update(
+            redmine_issue.id,
+            notes=f"This issue has moved to {gh_issue.html_url}",
+            status_id=5,
+        )
     status_bar_width = len(status_bar) * " "
     if redmine.issue.get(redmine_issue.id).status.id != 5:
         print(
@@ -341,7 +344,14 @@ def migrate(parsed_args):
         entry = _GH_ISSUES.get(key)
         if entry is not None:
             redmine_issue, gh_issue = entry
-            update_gh_issue_body(status_bar, redmine, redmine_issue, gh_issue, body_str)
+            update_gh_issue_body(
+                parsed_args.close_redmine_issues,
+                status_bar,
+                redmine,
+                redmine_issue,
+                gh_issue,
+                body_str,
+            )
             continue
 
         print(
