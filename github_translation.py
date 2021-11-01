@@ -27,7 +27,7 @@ users = {
     "Jim Kowalkowski": "jbkowalkowski",  # jbk@fnal.gov
     "Kurt Biery": "bieryAtFnal",  # biery@fnal.gov
     "Kyle Knoepfel": "knoepfel",  # knoepfel@fnal.gov
-    "Liang Li": None,  # liangli@fnal.gov
+    "Liang Li": "liangliphy",  # liangli@fnal.gov
     "Lisa Goodenough": "goodenou",  # goodenou@fnal.gov
     "Lynn Garren": "lgarren",  # garren@fnal.gov
     "Marc Mengel": "marcmengel",  # mengel@fnal.gov

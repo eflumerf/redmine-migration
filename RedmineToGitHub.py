@@ -18,6 +18,10 @@ class RedmineToGitHub:
         return users[0].login if users.totalCount == 1 else None
 
     def search_for_login(self, redmine_username, mail):
+        login = self._translation.get(redmine_username, False)
+        if login is not False:
+            return login
+
         if mail is not None:
             login = self._search(f"{mail} in:email")
             if login is not None:

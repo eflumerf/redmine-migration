@@ -52,17 +52,21 @@ def concat_mds(*mds):
 
 def guarded_gh_call(gh_method, *args, **kwargs):
     attempt = 0
-    while attempt < 2:
+    n = 4
+    while attempt < n:
         try:
             time.sleep(2.5)  # Attempt to avoid GitHub's API limits
             return gh_method(*args, **kwargs)
         except GithubException as e:
-            if e.status == 403 and e.data["message"].startswith(
+            attempt += 1
+            if attempt == n or e.status != 403:
+                raise e
+            message = e.data["message"]
+            if message.startswith(
                 "You have exceeded a secondary rate limit"
-            ):
-                print(" \n   (Waiting one minute due to rate limit)\n")
-                time.sleep(60)
-                attempt += 1
+            ) or message.startswith("API rate limit exceeded"):
+                print(" \n   Waiting 15 minutes due to rate limit...\n")
+                time.sleep(900)
             else:
                 raise e
 
@@ -100,11 +104,19 @@ def issue_comments(redmine, journals, gh_repo):
             continue
 
         username = at_gh_login_or_name(redmine, journal.user)
-        header = f"*Comment by `{username}` on {journal.created_on}*"
+        header = f"*Comment by {username} on {journal.created_on}*"
         result.append(
             concat_mds(header, _TEXTILE_TO_MARKDOWN.to_md(journal.notes, gh_repo))
         )
     return result
+
+
+def search_for_issue(title, query):
+    # To avoid rate limits
+    time.sleep(2.5)
+    issues = _GH.search_issues(query)
+    trimmed_issues = [issue for issue in issues if issue.title == title]
+    return trimmed_issues[0] if len(trimmed_issues) == 1 else None
 
 
 def migrate_issues_from(redmine, parsed_args, redmine_repo, gh_repo):
@@ -172,7 +184,7 @@ def migrate_issues_from(redmine, parsed_args, redmine_repo, gh_repo):
 
         gh_issue_body = concat_mds(
             f"*This issue has been migrated from {redmine_issue_url(issue)} (FNAL account required)*\n"
-            f"*Originally created by `{author}` on {issue.created_on}*",
+            f"*Originally created by {author} on {issue.created_on}*",
             _TEXTILE_TO_MARKDOWN.to_md(issue.description, gh_repo),
         )
 
@@ -273,9 +285,9 @@ def dependency_link(dependency):
 
 
 def update_gh_issue_body(
-    close_redmine_issue, status_bar, redmine, redmine_issue, gh_issue, body_addendum
+    close_redmine_issues, status_bar, redmine, redmine_issue, gh_issue, body_addendum
 ):
-    gh_issue.edit(body=concat_mds(gh_issue.body, body_addendum))
+    guarded_gh_call(gh_issue.edit, body=concat_mds(gh_issue.body, body_addendum))
     if close_redmine_issues:
         # Update Redmine issue with new GitHub issue ID; then close issue (status ID 5).
         redmine.issue.update(
@@ -340,7 +352,7 @@ def migrate(parsed_args):
     for key, subtasks in _ISSUES_WITH_SUBTASKS.items():
         subtasks_str = "\n***Subtasks:***"
         for d in subtasks:
-            subtasks_str += "\n- " + dependency_link(d)
+            subtasks_str += "\n- " + guarded_gh_call(dependency_link, d)
         issue_dependencies[key] += subtasks_str
 
     n_issues_with_relations = len(_ISSUES_WITH_RELATIONS)
@@ -349,7 +361,7 @@ def migrate(parsed_args):
     for key, subtasks in _ISSUES_WITH_RELATIONS.items():
         subtasks_str = "\n***Related issues:***"
         for d in subtasks:
-            subtasks_str += "\n- " + dependency_link(d)
+            subtasks_str += "\n- " + guarded_gh_call(dependency_link, d)
         issue_dependencies[key] += subtasks_str
 
     n_issues_with_dependencies = len(issue_dependencies)
