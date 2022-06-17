@@ -70,6 +70,13 @@ def guarded_gh_call(gh_method, *args, **kwargs):
             else:
                 raise e
 
+def gh_issues(repo):
+    issues = guarded_gh_call(repo.get_issues)
+    issue_dict = {}
+    for issue in issues:
+      issue_dict[issue.title] = issue.number
+
+    return issue_dict
 
 def gh_login_or_not_set(redmine, user):
     login = _REDMINE_TO_GITHUB.gh_login(user.name)
@@ -121,11 +128,15 @@ def search_for_issue(title, query):
 
 def migrate_issues_from(redmine, parsed_args, redmine_repo, gh_repo):
     redmine_issues = redmine.project.get(redmine_repo).issues
+    project_name = redmine.project.get(redmine_repo).name
     repo = None if parsed_args.dry_run else _GH_ORG.get_repo(gh_repo)
+    repo_issues = None if parsed_args.dry_run else gh_issues(repo)
+
+    print(f"There are {len(redmine_issues)} issues in the {redmine_repo} repository")
 
     # Ensures that we do not process nested repos to themselves.
     trimmed_redmine_issues = [
-        issue for issue in redmine_issues if issue.project.name == redmine_repo
+        issue for issue in redmine_issues if issue.project.name == project_name
     ]
     n_migrated_issues = 0
     n_issues = len(trimmed_redmine_issues)
@@ -224,16 +235,22 @@ def migrate_issues_from(redmine, parsed_args, redmine_repo, gh_repo):
         if issue.priority.name.lower() in {"high", "urgent", "immediate"}:
             gh_labels.append("high priority")
 
-        gh_issue = guarded_gh_call(
-            repo.create_issue,
-            issue.subject,
-            body=gh_issue_body,
-            labels=gh_labels,
-            assignee=assigned_to,
-        )
+        if issue.subject not in repo_issues.keys():
+            print(f"    {status_bar_width}  - Creating new issue from Redmine issue #{issue.id}")
+            gh_issue = guarded_gh_call(
+                repo.create_issue,
+                issue.subject,
+                body=gh_issue_body,
+                labels=gh_labels,
+                assignee=assigned_to,
+            )
 
-        for comment in comments:
-            guarded_gh_call(gh_issue.create_comment, comment)
+            for comment in comments:
+                guarded_gh_call(gh_issue.create_comment, comment)
+        else:
+            print(f"    {status_bar_width}  - Retrieving Github issue {repo_issues[issue.subject]}")
+            gh_issue = guarded_gh_call(repo.get_issue, number=repo_issues[issue.subject])
+
 
         _GH_ISSUES[issue.subject] = (issue, gh_issue)
         if has_subtasks_or_relations:
@@ -258,6 +275,8 @@ def migrate_issues_from(redmine, parsed_args, redmine_repo, gh_repo):
                     # Redmine issue was closed
                     symbol = _GREEN_CHECKMARK
                     redmine_message = f"Closed Redmine issue #{issue.id}"
+            else:
+                redmine_message = f"Not configured to close issue #{issue.id}"
             print(
                 f"  {symbol} {status_bar} Migrated issue #{issue.id}: {issue.subject}"
             )
